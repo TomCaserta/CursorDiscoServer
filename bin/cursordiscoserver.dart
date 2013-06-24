@@ -13,13 +13,11 @@ void main() {
   /// Start a new websocket server on [port]
   HttpServer.bind('0.0.0.0', port).then((HttpServer server) { 
     print('Starting CursorDisco on port: $port');
-    try { 
-      server.transform(new WebSocketTransformer()).listen(CursorClientServer.onConnection);
-    }
-    catch (E) {
-      
-    }
-  }, onError: (error) => print("Error starting HTTP server: $error"));
+      server.listen((req) {
+        WebSocketTransformer.upgrade(req).then((websocket) => CursorClientServer.onConnection(websocket)).catchError((e) { print("Transform Error: $e"); });
+      }, onError: (e) { print("ERROR: $e"); });
+
+  }).catchError((e) => print(e));;
  
 }
 
@@ -28,6 +26,7 @@ void main() {
 class CursorClientServer {
   static Map<String, CursorClientServer> connections = new Map<String, CursorClientServer>();
   dynamic ws;
+  double x = 0.0, y = 0.0;
   int currentPlayback = 0;
   
   CursorClientServer (this.ws) { if (!connections.containsKey(this.ws.hashCode.toString())) { connections[this.ws.hashCode.toString()] = this; } }
@@ -71,15 +70,15 @@ class CursorClientServer {
     print("New Connection :)");
     
     CursorClientServer current = new CursorClientServer(conn);
-    
-    CursorClientServer.sendToAll("NEWCONNECTION ${conn.hashCode}", conn);
+   
+    CursorClientServer.sendToAll("NEWCONNECTION ${conn.hashCode} ${current.x} ${current.y}", conn);
     
     // Sync client up with the current background and song
     DJManager.sendCurrBackground(current);
     DJManager.sendCurrSongAndTime(current);
     CursorClientServer.connections.forEach((String k,CursorClientServer v) {
       print("$k == ${conn.hashCode}");
-      if (k != conn.hashCode.toString()) current.send("NEWCONNECTION $k");    
+      if (k != conn.hashCode.toString()) current.send("NEWCONNECTION $k ${v.x} ${v.y}");    
     });
     conn.listen((message) {
       CursorClientServer CCC = CursorClientServer.getCCC(conn);
@@ -96,27 +95,39 @@ class CursorClientServer {
       var splitMsg = message.split(" ");
       switch (splitMsg[0]) {
         case "MOVECURSOR": 
-          // TODO: Add error handling if a malicious user sends something bad
-          double x = double.parse(splitMsg[1]);
-          double y = double.parse(splitMsg[2]);
           
-          // Convert the X Y co-ordinates sent by the client into a percentage of the screen
-          double screen_width = double.parse(splitMsg[3]);
-          double screen_height = double.parse(splitMsg[4]);
-         
-          double percent_width = (x /screen_width) * 100;
-          double percent_height = (y / screen_height) * 100;
-          
-          // Send cursor update to all clients
-          CursorClientServer.sendToAll("MOVECURSOR ${self.ws.hashCode} $percent_width $percent_height",self.ws);
+          // iPads like to send null values when they click the home button!
+          bool isErrored = false;
+          double x = double.parse(splitMsg[1],(error) { 
+            isErrored = true;            
+          });
+          double y = double.parse(splitMsg[2],(error) { 
+            isErrored = true;             
+          });
+          if (!isErrored) {
+              // Convert the X Y co-ordinates sent by the client into a percentage of the screen
+              double screen_width = double.parse(splitMsg[3]);
+              double screen_height = double.parse(splitMsg[4]);
+             
+              double percent_width = (x /screen_width) * 100;
+              double percent_height = (y / screen_height) * 100;
+              self.x = x;
+              self.y = y;
+              // Send cursor update to all clients
+              CursorClientServer.sendToAll("MOVECURSOR ${self.ws.hashCode} $percent_width $percent_height",self.ws);
+          }
+          else print("Malicious value sent from client intercepted (basically not a double).");
           break;
         case  "TIMEUPD": 
+          bool isErrored = false;
           // This message is sent every time a clients music progresses. 
-          int songTime = (double.parse(splitMsg[1])).toInt();
-          int songSync = (songTime - (DJManager.songTime.elapsedMilliseconds / 1000)).toInt();
-          
-          // If the music is out of sync then we should resend the song and time
-          if (!(songSync < 5 && songSync > -5)) DJManager.sendCurrSongAndTime(self); 
+          double songTime = double.parse(splitMsg[1], (error) { isErrored = true; });
+          if (!isErrored) {
+            int songSync = (songTime - (DJManager.songTime.elapsedMilliseconds / 1000)).toInt();
+            // If the music is out of sync then we should resend the song and time
+            if (!(songSync < 5 && songSync > -5)) DJManager.sendCurrSongAndTime(self); 
+          }
+          else print ("Malicious value sent from client intercepted (basically not a double).");
          break;
       }
       
